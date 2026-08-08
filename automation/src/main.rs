@@ -907,3 +907,25 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Box::new(WmApp::new(cc))),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_stay_mode() {
+        // 停留模式預設：目標 Google Maps、不填表、不點擊
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.url, "https://www.google.com/maps");
+        assert!(cfg.fields.is_empty(), "停留模式預設不填表");
+        assert!(cfg.submit_selector.is_empty(), "停留模式預設不點擊");
+    }
+
+    #[test]
+    fn format_remain_readable() {
+        assert!(format_remain(30).contains("分"));
+        assert!(format_remain(90).contains("小時"));
+        assert!(format_remain(1500).contains("天"));
+        assert!(format_remain(1500).contains("小時"));
+    }
+}
