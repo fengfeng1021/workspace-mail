@@ -120,6 +120,38 @@ mod tests {
     }
 
     #[test]
+    fn clear_used_restores_availability() {
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        assert!(!store.is_available("a01@aiapi.tw", 30));
+        // 手動解除冷卻 → 立即恢復可用（含持久化）
+        store.clear_used("a01@aiapi.tw");
+        assert!(store.is_available("a01@aiapi.tw", 30));
+        let path = std::env::temp_dir().join("usage-clear-test.json");
+        store.save(&path).unwrap();
+        let loaded = UsageStore::load(&path);
+        assert!(loaded.is_available("a01@aiapi.tw", 30), "解除後讀檔仍應可用");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cooldown_in_days_not_minutes() {
+        // 30 天 = 43200 分鐘（不是 30 分鐘）
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        match store.status("a01@aiapi.tw", 30) {
+            AccountStatus::Cooling { remain_min } => {
+                assert!(
+                    (43199..=43200).contains(&remain_min),
+                    "30 天應約 43200 分鐘，得到 {}",
+                    remain_min
+                );
+            }
+            s => panic!("應為冷卻中，得到 {:?}", s),
+        }
+    }
+
+    #[test]
     fn others_unaffected_by_single_mark() {
         let mut store = UsageStore::default();
         store.mark_used("a01@aiapi.tw");
