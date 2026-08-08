@@ -53,8 +53,8 @@ struct AppConfig {
     parallel: usize,
     /// 冷卻開關
     cooldown_enabled: bool,
-    /// 冷卻分鐘數（自訂）
-    cooldown_minutes: u64,
+    /// 冷卻天數（自訂）
+    cooldown_days: u64,
     /// 執行成功後自動標記已使用
     auto_mark_used: bool,
 }
@@ -80,9 +80,26 @@ impl Default for AppConfig {
             step_delay_ms: 500,
             parallel: 5,
             cooldown_enabled: true,
-            cooldown_minutes: 30,
+            cooldown_days: 1,
             auto_mark_used: true,
         }
+    }
+}
+
+/// 剩餘冷卻時間格式化（分鐘 → 天／小時）
+fn format_remain(remain_min: u64) -> String {
+    if remain_min >= 1440 {
+        let days = remain_min / 1440;
+        let hours = (remain_min % 1440) / 60;
+        if hours > 0 {
+            format!("⏳ 冷卻 {}天{}小時", days, hours)
+        } else {
+            format!("⏳ 冷卻 {}天", days)
+        }
+    } else if remain_min >= 60 {
+        format!("⏳ 冷卻 {}小時", remain_min / 60)
+    } else {
+        format!("⏳ 冷卻 {}分", remain_min)
     }
 }
 
@@ -258,30 +275,12 @@ impl WmApp {
         }
     }
 
-    fn cooldown_min(&self) -> u64 {
-        if self.cfg.cooldown_enabled { self.cfg.cooldown_minutes } else { 0 }
+    fn cooldown_days(&self) -> u64 {
+        if self.cfg.cooldown_enabled { self.cfg.cooldown_days } else { 0 }
     }
 
     fn is_available(&self, email: &str) -> bool {
-        self.usage.is_available(email, self.cooldown_min())
-    }
-
-    /// 可見帳號（依搜尋 + 篩選）
-    fn visible_accounts(&self) -> Vec<&Account> {
-        let term = self.search.trim().to_lowercase();
-        self.accounts
-            .iter()
-            .filter(|a| {
-                if !term.is_empty() && !a.email.to_lowercase().contains(&term) {
-                    return false;
-                }
-                match self.filter {
-                    AccFilter::All => true,
-                    AccFilter::Available => self.is_available(&a.email),
-                    AccFilter::Cooling => !self.is_available(&a.email),
-                }
-            })
-            .collect()
+        self.usage.is_available(email, self.cooldown_days())
     }
 
     /// 啟動批次任務（傳入要跑的帳號）
@@ -294,10 +293,13 @@ impl WmApp {
             self.status = "⚠️ 沒有可執行的帳號（請勾選且需為可用狀態）".into();
             return;
         }
-        if self.cfg.url.trim().is_empty() {
-            self.status = "⚠️ 請填寫目標網址".into();
-            return;
-        }
+        // URL 未填 → 開 about:blank（瀏覽器仍會開啟，方便先登入 Google）
+        let url = if self.cfg.url.trim().is_empty() {
+            self.log("ℹ️ 目標網址未填寫，瀏覽器將開啟空白頁（可在目標網址填 accounts.google.com 做登入）");
+            "about:blank".to_string()
+        } else {
+            self.cfg.url.trim().to_string()
+        };
         self.save_config();
 
         self.running = true;
@@ -307,7 +309,7 @@ impl WmApp {
         self.status = format!("開始執行：共 {} 個帳號", self.total_count);
 
         let task = TaskConfig {
-            url: self.cfg.url.clone(),
+            url: url.clone(),
             fields: self.cfg.fields.clone(),
             submit_selector: self.cfg.submit_selector.clone(),
             wait_after_ms: self.cfg.wait_after_ms,
@@ -416,49 +418,25 @@ impl WmApp {
         self.launch_task(vec![acc.clone()]);
     }
 
-    fn spawn_firestore_job(&mut self, job: FirestoreJob) {
+    fn spawn_firestore_job(&mut self) {
         let mut client = FirestoreClient::new(self.cfg.firebase.clone());
         let tx = self.log_tx.clone();
         self.rt.spawn(async move {
-            match job {
-                FirestoreJob::Domains => {
-                    let login = client.login().await;
-                    let result = match login {
-                        Ok(_) => client.list_domains().await,
-                        Err(e) => Err(e),
-                    };
-                    match result {
-                        Ok(ds) => {
-                            let _ = tx.send(format!("__DOMAINS__{}", serde_json::to_string(&ds).unwrap_or_default()));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(format!("❌ 讀取域名失敗：{}", e));
-                        }
-                    }
+            let login = client.login().await;
+            let result = match login {
+                Ok(_) => client.fetch_all_accounts().await,
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(accs) => {
+                    let _ = tx.send(format!("__ACCOUNTS__{}", serde_json::to_string(&accs).unwrap_or_default()));
                 }
-                FirestoreJob::Accounts(domain) => {
-                    let login = client.login().await;
-                    let result = match login {
-                        Ok(_) => client.fetch_accounts(&domain).await,
-                        Err(e) => Err(e),
-                    };
-                    match result {
-                        Ok(accs) => {
-                            let _ = tx.send(format!("__ACCOUNTS__{}", serde_json::to_string(&accs).unwrap_or_default()));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(format!("❌ 讀取帳號失敗：{}", e));
-                        }
-                    }
+                Err(e) => {
+                    let _ = tx.send(format!("❌ 讀取帳號失敗：{}", e));
                 }
             }
         });
     }
-}
-
-enum FirestoreJob {
-    Domains,
-    Accounts(String),
 }
 
 impl eframe::App for WmApp {
@@ -573,13 +551,21 @@ impl eframe::App for WmApp {
             .show(ctx, |ui| {
                 ui.add_space(colors::SPACE);
                 ui.horizontal(|ui| {
-                    ui.strong(format!("帳號列表（{}）", self.accounts.len()));
-                    if ui.small_button("全選").on_hover_text("選取全部帳號").clicked() {
-                        for a in &self.accounts {
-                            self.selected.insert(a.email.clone());
+                    ui.strong(format!("📁 帳號資料夾（{}）", self.accounts.len()));
+                    ui.separator();
+                    // 一鍵選取所有可用帳號（解決逐個勾選麻煩）
+                    if ui
+                        .small_button("☑ 全選可用")
+                        .on_hover_text("一鍵勾選所有「可用」狀態的帳號")
+                        .clicked()
+                    {
+                        for acc in &self.accounts {
+                            if self.is_available(&acc.email) {
+                                self.selected.insert(acc.email.clone());
+                            }
                         }
                     }
-                    if ui.small_button("清空選取").on_hover_text("取消所有勾選").clicked() {
+                    if ui.small_button("✖ 清除").on_hover_text("取消所有勾選").clicked() {
                         self.selected.clear();
                     }
                 });
@@ -598,7 +584,7 @@ impl eframe::App for WmApp {
                         .on_hover_text("使用過，等待冷卻結束才能再用");
                     ui.separator();
                     if ui
-                        .small_button("🗑 標記勾選為已使用")
+                        .small_button("🗑 標記勾選已使用")
                         .on_hover_text("把勾選的帳號標記為已使用（進入冷卻）")
                         .clicked()
                     {
@@ -609,57 +595,123 @@ impl eframe::App for WmApp {
                         let _ = self.usage.save(&usage_path());
                         self.log(format!("手動標記 {} 個帳號為已使用", n));
                     }
+                    if ui
+                        .small_button("🔓 解除勾選冷卻")
+                        .on_hover_text("把勾選中「冷卻中」的帳號立即恢復為可用")
+                        .clicked()
+                    {
+                        let mut n = 0;
+                        for e in self.selected.iter() {
+                            if !self.is_available(e) {
+                                self.usage.clear_used(e);
+                                n += 1;
+                            }
+                        }
+                        let _ = self.usage.save(&usage_path());
+                        self.log(format!("手動解除 {} 個帳號的冷卻", n));
+                    }
                 });
                 ui.separator();
 
-                let visible_emails: Vec<String> = self
-                    .visible_accounts()
-                    .into_iter()
-                    .map(|a| a.email.clone())
-                    .collect();
+                // ===== 資料夾樹：域名 = 資料夾，帳號在內 =====
+                let term = self.search.trim().to_lowercase();
+                let mut by_domain: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+                for acc in &self.accounts {
+                    // 搜尋 + 篩選
+                    if !term.is_empty() && !acc.email.to_lowercase().contains(&term) {
+                        continue;
+                    }
+                    let ok = match self.filter {
+                        AccFilter::All => true,
+                        AccFilter::Available => self.is_available(&acc.email),
+                        AccFilter::Cooling => !self.is_available(&acc.email),
+                    };
+                    if !ok {
+                        continue;
+                    }
+                    let key = if acc.domain.is_empty() { "（未分類）".to_string() } else { acc.domain.clone() };
+                    by_domain.entry(key).or_default().push(acc.email.clone());
+                }
+
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for email in &visible_emails {
-                        let Some(acc) = self.accounts.iter().find(|a| &a.email == email).cloned() else {
-                            continue;
-                        };
-                        let status = self.usage.status(&acc.email, self.cooldown_min());
-                        let mut sel = self.selected.contains(&acc.email);
+                    for (domain, emails) in &by_domain {
+                        let avail = emails
+                            .iter()
+                            .filter(|e| self.is_available(e))
+                            .count();
+                        let all_sel = emails.iter().all(|e| self.selected.contains(e));
+                        let header = format!(
+                            "📁 {}（{} 個{}{}）",
+                            domain,
+                            emails.len(),
+                            if avail > 0 { format!("\u{ff0c}可用 {}", avail) } else { String::new() },
+                            if all_sel { "\u{ff0c}已全選" } else { "" },
+                        );
                         ui.horizontal(|ui| {
-                            if ui.checkbox(&mut sel, "").changed() {
-                                if sel {
-                                    self.selected.insert(acc.email.clone());
-                                } else {
-                                    self.selected.remove(&acc.email);
+                            // 資料夾級勾選（一次選取整個域名）
+                            let mut sel = all_sel;
+                            if ui.checkbox(&mut sel, "").on_hover_text("選取／取消整個資料夾").changed() {
+                                let to_toggle: Vec<String> = emails.clone();
+                                for e in to_toggle {
+                                    if sel {
+                                        self.selected.insert(e);
+                                    } else {
+                                        self.selected.remove(&e);
+                                    }
                                 }
                             }
-                            ui.label(&acc.email);
-                            match status {
-                                AccountStatus::Available => {
-                                    ui.colored_label(colors::SUCCESS, "✅ 可用")
-                                        .on_hover_text("可以執行");
-                                }
-                                AccountStatus::Cooling { remain_min } => {
-                                    ui.colored_label(
-                                        colors::WARNING,
-                                        format!("⏳ 冷卻 {}m", remain_min),
-                                    )
-                                    .on_hover_text("等待冷卻結束才能再用");
-                                }
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .small_button("▶ 單開")
-                                    .on_hover_text("只執行這一個帳號")
-                                    .clicked()
-                                {
-                                    let acc = acc.clone();
-                                    self.run_single(&acc);
-                                }
-                            });
+                            egui::CollapsingHeader::new(header)
+                                .default_open(emails.len() <= 10)
+                                .show(ui, |ui| {
+                                    for email in emails {
+                                        let Some(acc) = self.accounts.iter().find(|a| &a.email == email).cloned() else {
+                                            continue;
+                                        };
+                                        let status = self.usage.status(&acc.email, self.cooldown_days());
+                                        let mut sel = self.selected.contains(&acc.email);
+                                        ui.horizontal(|ui| {
+                                            if ui.checkbox(&mut sel, "").changed() {
+                                                if sel {
+                                                    self.selected.insert(acc.email.clone());
+                                                } else {
+                                                    self.selected.remove(&acc.email);
+                                                }
+                                            }
+                                            ui.label(&acc.email);
+                                            match status {
+                                                AccountStatus::Available => {
+                                                    ui.colored_label(colors::SUCCESS, "✅ 可用")
+                                                        .on_hover_text("可以執行");
+                                                }
+                                                AccountStatus::Cooling { remain_min } => {
+                                                    ui.colored_label(
+                                                        colors::WARNING,
+                                                        format!("⏳ {}", format_remain(remain_min)),
+                                                    )
+                                                    .on_hover_text("等待冷卻結束才能再用，或手動解除");
+                                                }
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if ui
+                                                        .small_button("▶ 單開")
+                                                        .on_hover_text("只執行這一個帳號")
+                                                        .clicked()
+                                                    {
+                                                        self.run_single(&acc);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                });
                         });
                     }
-                    if visible_emails.is_empty() {
-                        ui.label(egui::RichText::new("（沒有符合條件的帳號，請先載入帳號）").weak());
+                    if by_domain.is_empty() {
+                        ui.label(
+                            egui::RichText::new("（沒有帳號——點右側「📥 載入帳號」取得帳號清單）").weak(),
+                        );
                     }
                 });
             });
@@ -692,27 +744,22 @@ impl eframe::App for WmApp {
 
                 ui.separator();
 
-                // 帳號來源
+                // 帳號來源（一次載入全部，左側自動分資料夾）
                 ui.horizontal(|ui| {
-                    ui.label("域名");
-                    egui::ComboBox::from_id_source("domain_sel")
-                        .selected_text(if self.cfg.domain.is_empty() { "（未選）" } else { &self.cfg.domain })
-                        .show_ui(ui, |ui| {
-                            for d in &self.domains {
-                                ui.selectable_value(&mut self.cfg.domain, d.clone(), d);
-                            }
-                        });
-                    if ui.button("載入域名").clicked() {
-                        self.status = "讀取域名中…".into();
-                        self.spawn_firestore_job(FirestoreJob::Domains);
+                    if ui
+                        .button(egui::RichText::new("📥 載入帳號").size(15.0))
+                        .on_hover_text("從 Firebase 一次讀取全部域名的帳號")
+                        .clicked()
+                    {
+                        self.status = "讀取帳號中…".into();
+                        self.spawn_firestore_job();
                     }
-                    if ui.button("載入帳號").clicked() {
-                        if self.cfg.domain.is_empty() {
-                            self.status = "⚠️ 請先選擇域名".into();
-                        } else {
-                            self.status = "讀取帳號中…".into();
-                            self.spawn_firestore_job(FirestoreJob::Accounts(self.cfg.domain.clone()));
-                        }
+                    if self.accounts.is_empty() {
+                        ui.label(egui::RichText::new("尚未載入帳號").weak());
+                    } else {
+                        ui.label(
+                            egui::RichText::new(format!("已載入 {} 個帳號", self.accounts.len())).weak(),
+                        );
                     }
                 });
 
@@ -767,7 +814,12 @@ impl eframe::App for WmApp {
                     ui.checkbox(&mut self.cfg.cooldown_enabled, "啟用冷卻（使用過的帳號需等待才能再用）");
                     ui.add_enabled_ui(self.cfg.cooldown_enabled, |ui| {
                         ui.label("冷卻時間");
-                        ui.add(egui::DragValue::new(&mut self.cfg.cooldown_minutes).clamp_range(0..=10080).suffix(" 分鐘"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.cfg.cooldown_days)
+                                .clamp_range(0..=365)
+                                .suffix(" 天"),
+                        );
+                        ui.label("（0 = 停用）");
                     });
                 });
                 ui.checkbox(&mut self.cfg.auto_mark_used, "執行成功後自動標記為已使用");

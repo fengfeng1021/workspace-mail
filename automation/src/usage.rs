@@ -57,12 +57,12 @@ impl UsageStore {
             .last_used_at = Some(now_ms());
     }
 
-    /// 查狀態
-    pub fn status(&self, email: &str, cooldown_min: u64) -> AccountStatus {
+    /// 查狀態（cooldown_days：冷卻天數）
+    pub fn status(&self, email: &str, cooldown_days: u64) -> AccountStatus {
         match self.map.get(email).and_then(|u| u.last_used_at) {
             None => AccountStatus::Available,
             Some(t) => {
-                let cd_ms = cooldown_min.saturating_mul(60_000);
+                let cd_ms = cooldown_days.saturating_mul(86_400_000);
                 let elapsed = now_ms().saturating_sub(t);
                 if cd_ms == 0 || elapsed >= cd_ms {
                     AccountStatus::Available
@@ -75,8 +75,15 @@ impl UsageStore {
         }
     }
 
-    pub fn is_available(&self, email: &str, cooldown_min: u64) -> bool {
-        self.status(email, cooldown_min) == AccountStatus::Available
+    pub fn is_available(&self, email: &str, cooldown_days: u64) -> bool {
+        self.status(email, cooldown_days) == AccountStatus::Available
+    }
+
+    /// 手動解除冷卻（清除使用紀錄，立即恢復可用）
+    pub fn clear_used(&mut self, email: &str) {
+        if let Some(u) = self.map.get_mut(email) {
+            u.last_used_at = None;
+        }
     }
 }
 
@@ -97,7 +104,8 @@ mod tests {
         store.mark_used("a01@aiapi.tw");
         match store.status("a01@aiapi.tw", 30) {
             AccountStatus::Cooling { remain_min } => {
-                assert!((29..=30).contains(&remain_min), "剩餘應約 30m，得到 {}", remain_min);
+                // 30 天 = 43200 分鐘
+                assert!((43199..=43200).contains(&remain_min), "剩餘應約 30 天，得到 {} 分鐘", remain_min);
             }
             s => panic!("應為冷卻中，得到 {:?}", s),
         }

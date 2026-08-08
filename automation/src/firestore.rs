@@ -15,6 +15,7 @@ pub struct Account {
     pub email: String,
     pub password: String,
     pub note: String,
+    pub domain: String,
 }
 
 #[derive(Clone)]
@@ -34,16 +35,6 @@ struct SignInResponse {
 #[derive(Deserialize)]
 struct ApiError {
     message: String,
-}
-
-#[derive(Deserialize)]
-struct QueryResponse {
-    documents: Option<Vec<QueryDoc>>,
-}
-
-#[derive(Deserialize)]
-struct QueryDoc {
-    fields: Option<serde_json::Value>,
 }
 
 impl FirestoreClient {
@@ -92,27 +83,18 @@ impl FirestoreClient {
             .ok_or_else(|| anyhow!("尚未登入 Firebase"))
     }
 
-    /// 讀取指定域名的所有帳號
-    pub async fn fetch_accounts(&mut self, domain: &str) -> Result<Vec<Account>> {
+    /// 讀取全部帳號（不分域名，供資料夾分組顯示）
+    pub async fn fetch_all_accounts(&mut self) -> Result<Vec<Account>> {
         let url = format!(
             "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents:runQuery",
             self.config.project_id
         );
-        let body = serde_json::json!({
-            "structuredQuery": {
-                "from": [{"collectionId": "accounts"}],
-                "where": {
-                    "fieldFilter": {
-                        "field": {"fieldPath": "domain"},
-                        "op": "EQUAL",
-                        "value": {"stringValue": domain}
-                    }
-                }
-            }
-        });
-
-        // token 過期時重新登入重試一次（避免 async 遞迴）
         for attempt in 0..2 {
+            let body = serde_json::json!({
+                "structuredQuery": {
+                    "from": [{ "collectionId": "accounts" }]
+                }
+            });
             let resp = self
                 .http
                 .post(&url)
@@ -120,25 +102,23 @@ impl FirestoreClient {
                 .json(&body)
                 .send()
                 .await?;
-
             if !resp.status().is_success() {
-                let txt = resp.text().await.unwrap_or_default();
-                let auth_fail =
-                    txt.contains("UNAUTHENTICATED") || txt.contains("permission denied");
-                if attempt == 0 && auth_fail {
+                let txt = resp.text().await?;
+                if attempt == 0 && (txt.contains("UNAUTHENTICATED") || txt.contains("permission denied")) {
                     self.login().await?;
                     continue;
                 }
-                return Err(anyhow!("查詢失敗: {}", txt));
+                return Err(anyhow!("讀取全部帳號失敗: {}", txt));
             }
-
-            let docs: Vec<serde_json::Value> = resp.json().await?;
+            let rows: Vec<serde_json::Value> = resp.json().await?;
             let mut accounts = Vec::new();
-            for doc in docs {
-                let d = doc.get("document").and_then(|x| x.get("fields"));
-                let Some(d) = d else { continue };
+            for row in rows {
+                let doc = row.get("document").or(row.get("doc"));
+                let Some(doc) = doc else { continue };
+                let Some(fields) = doc.get("fields") else { continue };
                 let get = |k: &str| -> String {
-                    d.get(k)
+                    fields
+                        .get(k)
                         .and_then(|v| v.get("stringValue"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
@@ -148,55 +128,13 @@ impl FirestoreClient {
                     email: get("account"),
                     password: get("password"),
                     note: get("note"),
+                    domain: get("domain"),
                 });
             }
             return Ok(accounts);
         }
-        unreachable!("重試迴圈結束")
+        Err(anyhow!("登入重試後仍失敗"))
     }
 
-    /// 列出所有域名（供 UI 下拉選單）
-    pub async fn list_domains(&mut self) -> Result<Vec<String>> {
-        let url = format!(
-            "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents/domains",
-            self.config.project_id
-        );
 
-        for attempt in 0..2 {
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(self.token()?)
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                let txt = resp.text().await.unwrap_or_default();
-                let auth_fail =
-                    txt.contains("UNAUTHENTICATED") || txt.contains("permission denied");
-                if attempt == 0 && auth_fail {
-                    self.login().await?;
-                    continue;
-                }
-                return Err(anyhow!("讀取域名失敗: {}", txt));
-            }
-            let body: QueryResponse = resp.json().await?;
-            let mut domains = Vec::new();
-            if let Some(docs) = body.documents {
-                for doc in docs {
-                    if let Some(fields) = doc.fields {
-                        if let Some(n) = fields
-                            .get("name")
-                            .and_then(|v| v.get("stringValue"))
-                            .and_then(|v| v.as_str())
-                        {
-                            domains.push(n.to_string());
-                        }
-                    }
-                }
-            }
-            domains.sort();
-            return Ok(domains);
-        }
-        unreachable!("重試迴圈結束")
-    }
 }
