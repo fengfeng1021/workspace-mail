@@ -162,6 +162,10 @@ pub fn fingerprint_js(fp: &Fingerprint) -> String {
   Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {dm} }});
   Object.defineProperty(navigator, 'platform', {{ get: () => '{platform}' }});
   Object.defineProperty(screen, 'colorDepth', {{ get: () => {cd} }});
+
+  // 語言覆蓋（navigator.language 不受 CDP setLocaleOverride 控制，需 JS 覆蓋）
+  Object.defineProperty(navigator, 'language', {{ get: () => 'zh-TW' }});
+  Object.defineProperty(navigator, 'languages', {{ get: () => ['zh-TW', 'zh', 'en-US'] }});
 }})();
 "#,
         seed = seed,

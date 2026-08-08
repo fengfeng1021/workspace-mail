@@ -62,6 +62,9 @@ fn build_browser_config(chrome_path: &str, profile_dir: &PathBuf, fp: &Fingerpri
         .arg("--mute-audio")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
+        // 語言：影響 Accept-Language header 與 Intl 預設
+        .arg("--lang=zh-TW")
+        .arg("--accept-lang=zh-TW,zh;q=0.9,en-US;q=0.8")
         .build()
         .map_err(|e| anyhow!("瀏覽器設定失敗: {}", e))
 }
