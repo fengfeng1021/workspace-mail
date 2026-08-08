@@ -349,7 +349,7 @@ pub async fn login_google_task(
                         return Err(anyhow!("登入被拒：{}", msg));
                     }
                     // 「密碼已在 X 小時前變更」＝資訊提示：密碼已填妥，繼續點下一步
-                    if (msg.contains("變更") || m.contains("changed")) && url.contains("accounts.google.com") {
+                    if (msg.contains("變更") || msg.to_lowercase().contains("changed")) && url.contains("accounts.google.com") {
                         let _ = log.send(format!("{} ℹ️ 偵測到「密碼已變更」提示（資訊非錯誤），繼續登入…", tag));
                         let _ = click_button_by_text(&page, "下一步").await;
                         tokio::time::sleep(Duration::from_secs(5)).await;
