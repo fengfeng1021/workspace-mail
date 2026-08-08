@@ -114,12 +114,17 @@ pub async fn run_account_task(
 
     let result = run_task_in_browser(&mut browser, &tag, &email, &password, &note, &task, &fp, &log).await;
 
-    // 關閉瀏覽器（無論成敗）
-    let _ = browser.close().await;
+    // 停留模式：不關閉瀏覽器——leak Browser（避免 drop 時 kill_on_drop 殺掉 Chrome），
+    // 使用者手動關掉視窗即結束
+    std::mem::forget(browser);
 
     match &result {
         Ok(()) => {
-            let _ = log.send(format!("{} ✅ 完成", tag));
+            if task.fields.is_empty() && task.submit_selector.is_empty() {
+                let _ = log.send(format!("{} ✅ 已開啟並停留在目標頁（手動關閉視窗即結束）", tag));
+            } else {
+                let _ = log.send(format!("{} ✅ 完成，瀏覽器保持開啟（手動關閉視窗即結束）", tag));
+            }
         }
         Err(e) => {
             let _ = log.send(format!("{} ❌ {}", tag, e));

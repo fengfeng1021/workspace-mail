@@ -70,12 +70,10 @@ impl Default for AppConfig {
             },
             chrome_path: r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
             domain: "".into(),
-            url: "".into(),
-            fields: vec![
-                FieldAction { selector: "#email".into(), value: "{email}".into() },
-                FieldAction { selector: "#password".into(), value: "{password}".into() },
-            ],
-            submit_selector: "button[type=submit]".into(),
+            url: "https://www.google.com/maps".into(),
+            // 預設純停留模式：不填表不點擊（需要時在 UI 新增欄位）
+            fields: vec![],
+            submit_selector: "".into(),
             wait_after_ms: 3000,
             step_delay_ms: 500,
             parallel: 5,
