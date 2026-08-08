@@ -308,13 +308,28 @@ pub async fn login_google_task(
             .map_err(|e| anyhow!("讀取頁面狀態失敗: {}", e))?
             .unwrap_or_default();
 
-        // 錯誤訊息檢查（密碼錯誤／帳號問題）
-        let err_js = r#"(() => { const el = document.querySelector('[role=alert], .error, [jsname="B34EJ"]'); return el ? el.innerText.slice(0, 100) : ''; })()"#;
+        // 錯誤訊息檢查——只認「真正的錯誤」，忽略提示性訊息（如「密碼已在 X 小時前變更」是資訊提示，不是失敗）
+        let err_js = r#"(() => { const el = document.querySelector('[role=alert], .error, [jsname="B34EJ"]'); return el ? el.innerText.slice(0, 120) : ''; })()"#;
         if let Ok(res) = page.evaluate_expression(err_js).await {
             if let Some(v) = res.value() {
                 if let Some(msg) = v.as_str() {
-                    if !msg.is_empty() && url.contains("accounts.google.com") {
+                    let m = msg.to_lowercase();
+                    let is_real_error = ["無法登入", "不正確", "密碼錯誤", "找不到您的", "未註冊", "無法識別",
+                        "couldn't find", "can't sign", "incorrect", "invalid", "isn't a google", "not registered"]
+                        .iter().any(|k| m.contains(k));
+                    if is_real_error && url.contains("accounts.google.com") {
                         return Err(anyhow!("登入被拒：{}", msg));
+                    }
+                    // 「密碼已在 X 小時前變更」＝資訊提示：密碼已填妥，繼續點下一步
+                    if (msg.contains("變更") || m.contains("changed")) && url.contains("accounts.google.com") {
+                        let _ = log.send(format!("{} ℹ️ 偵測到「密碼已變更」提示（資訊非錯誤），繼續登入…", tag));
+                        let _ = click_button_by_text(&page, "下一步").await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let url_after = page.url().await.ok().flatten().unwrap_or_default();
+                        if !url_after.contains("accounts.google.com") {
+                            let _ = log.send(format!("{} ✅ 登入成功（cookie 已存入 profile）", tag));
+                            return Ok(LoginResult::Success);
+                        }
                     }
                 }
             }
