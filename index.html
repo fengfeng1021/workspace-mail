@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workspace Mail 郵箱管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- ===== 登入畫面 ===== -->
+<div id="login-screen" class="screen hidden">
+  <div class="login-card">
+    <h1>📮 Workspace Mail</h1>
+    <p class="subtitle">郵箱帳號管理系統</p>
+    <input type="email" id="login-email" placeholder="Email" autocomplete="username">
+    <input type="password" id="login-password" placeholder="密碼" autocomplete="current-password">
+    <button id="login-btn" class="btn primary">登入</button>
+    <div id="login-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ===== 主畫面 ===== -->
+<div id="main-screen" class="screen hidden">
+  <header>
+    <div class="header-left">
+      <h1>📮 Workspace Mail</h1>
+      <span id="user-badge" class="badge"></span>
+    </div>
+    <div class="header-right">
+      <button id="ai-add-btn" class="btn ai" title="預留 AI 接口：批量生成/新增帳號">🤖 AI 新增</button>
+      <button id="batch-add-btn" class="btn">＋ 批量新增</button>
+      <button id="logout-btn" class="btn ghost">登出</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- 左側：域名分類 -->
+    <aside id="domain-panel">
+      <div class="panel-title">
+        <span>域名分類</span>
+        <button id="add-domain-btn" class="btn small" title="新增域名">＋ 新增域名</button>
+      </div>
+      <ul id="domain-list" class="domain-list"></ul>
+    </aside>
+
+    <!-- 右側：該域名的郵箱清單 -->
+    <main id="account-panel">
+      <div class="panel-title">
+        <span id="current-domain-title">請選擇域名</span>
+        <div class="panel-actions">
+          <input type="search" id="search-box" placeholder="搜尋帳號…" class="search-box">
+          <button id="add-account-btn" class="btn small">＋ 新增帳號</button>
+        </div>
+      </div>
+      <div id="account-toolbar" class="toolbar hidden">
+        <span id="selected-count">已選 0 項</span>
+        <button id="delete-selected-btn" class="btn danger small">🗑 刪除所選</button>
+      </div>
+      <table id="account-table" class="account-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="select-all"></th>
+            <th>帳號</th>
+            <th>密碼</th>
+            <th>備註</th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="account-tbody"></tbody>
+      </table>
+      <div id="account-empty" class="empty">這個域名還沒有帳號紀錄</div>
+    </main>
+  </div>
+</div>
+
+<!-- ===== 新增/編輯帳號 Modal ===== -->
+<div id="account-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="account-modal-title">新增帳號</h3>
+    <label>帳號（信箱）</label>
+    <input type="text" id="acc-email" placeholder="例如 a01@example.com">
+    <label>密碼</label>
+    <input type="text" id="acc-password" placeholder="密碼">
+    <label>備註（選填）</label>
+    <input type="text" id="acc-note" placeholder="備註">
+    <div class="modal-actions">
+      <button id="acc-save" class="btn primary">儲存</button>
+      <button id="acc-cancel" class="btn ghost">取消</button>
+    </div>
+    <div id="acc-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ===== 批量新增 Modal ===== -->
+<div id="batch-modal" class="modal hidden">
+  <div class="modal-card wide">
+    <h3>批量新增帳號</h3>
+    <p class="hint">每行一個帳號，格式：<code>帳號 密碼 備註(選填)</code>，空格分隔</p>
+    <textarea id="batch-input" rows="10" placeholder="a01@example.com WJF7374520wjf&#10;a02@example.com WJF7374520wjf 備註2"></textarea>
+    <div class="modal-actions">
+      <button id="batch-save" class="btn primary">新增</button>
+      <button id="batch-cancel" class="btn ghost">取消</button>
+    </div>
+    <div id="batch-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ===== AI 新增 Modal（預留接口） ===== -->
+<div id="ai-modal" class="modal hidden">
+  <div class="modal-card wide">
+    <h3>🤖 AI 新增帳號 <span class="tag">預留接口</span></h3>
+    <p class="hint">AI 接口回傳 JSON 陣列，每項格式：<code>{"email":"...","password":"...","note":"..."}</code></p>
+    <label>AI 指令 / 描述</label>
+    <textarea id="ai-input" rows="4" placeholder="例如：生成 20 個格式為 a## 的帳號密碼"></textarea>
+    <div class="modal-actions">
+      <button id="ai-run" class="btn ai">呼叫 AI</button>
+      <button id="ai-cancel" class="btn ghost">取消</button>
+    </div>
+    <div id="ai-msg" class="msg"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
