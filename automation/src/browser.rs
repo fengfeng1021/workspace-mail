@@ -215,6 +215,37 @@ async fn type_text(
     Ok(())
 }
 
+/// 判斷是否為「真正的登入錯誤」（排除資訊提示如「密碼已在 X 小時前變更」）
+pub fn is_real_login_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    ["無法登入", "不正確", "密碼錯誤", "找不到您的", "未註冊", "無法識別",
+     "couldn't find", "can't sign", "incorrect", "invalid", "isn't a google", "not registered"]
+        .iter().any(|k| m.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_real_login_error;
+
+    #[test]
+    fn password_changed_notice_is_not_error() {
+        // 「密碼已在 X 小時前變更」是資訊提示，不是登入失敗
+        assert!(!is_real_login_error("您的密碼已在 10 小時前變更"));
+        assert!(!is_real_login_error("Your password was changed 10 hours ago"));
+        assert!(!is_real_login_error(""));
+    }
+
+    #[test]
+    fn real_errors_detected() {
+        assert!(is_real_login_error("無法登入，請確認密碼是否正確"));
+        assert!(is_real_login_error("密碼不正確"));
+        assert!(is_real_login_error("找不到您的 Google 帳戶"));
+        assert!(is_real_login_error("couldn't find your Google Account"));
+        assert!(is_real_login_error("The password is incorrect"));
+        assert!(is_real_login_error("invalid credentials"));
+    }
+}
+
 /// 依文字點擊按鈕（Google 登入頁的下一步/登入按鈕無穩定 id，用文字匹配）
 async fn click_button_by_text(page: &Page, text: &str) -> Result<()> {
     let js = format!(
@@ -313,10 +344,7 @@ pub async fn login_google_task(
         if let Ok(res) = page.evaluate_expression(err_js).await {
             if let Some(v) = res.value() {
                 if let Some(msg) = v.as_str() {
-                    let m = msg.to_lowercase();
-                    let is_real_error = ["無法登入", "不正確", "密碼錯誤", "找不到您的", "未註冊", "無法識別",
-                        "couldn't find", "can't sign", "incorrect", "invalid", "isn't a google", "not registered"]
-                        .iter().any(|k| m.contains(k));
+                    let is_real_error = is_real_login_error(msg);
                     if is_real_error && url.contains("accounts.google.com") {
                         return Err(anyhow!("登入被拒：{}", msg));
                     }
