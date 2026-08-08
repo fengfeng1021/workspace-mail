@@ -22,8 +22,8 @@ const PROFILE_ROOT: &str = r"D:\Desktop\App\Workspace-Mail\wm-profiles";
 /// 色彩系統（品牌統一：一處定義，全 UI 使用）
 mod colors {
     use egui::Color32;
-    // 品牌主色
-    pub const PRIMARY: Color32 = Color32::from_rgb(79, 140, 255);
+    // 品牌主色（深藍：白字對比 ≥5:1，WCAG AA 保險餘量）
+    pub const PRIMARY: Color32 = Color32::from_rgb(38, 82, 200);
     // 語義色
     pub const SUCCESS: Color32 = Color32::from_rgb(80, 220, 120);
     pub const WARNING: Color32 = Color32::from_rgb(240, 170, 60);
