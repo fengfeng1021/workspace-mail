@@ -1031,4 +1031,19 @@ mod tests {
         assert!(format_remain(1500).contains("天"));
         assert!(format_remain(1500).contains("小時"));
     }
+
+    #[test]
+    fn login_store_mark_and_persist() {
+        // 登入成功標記 → 顯示已登入，且存檔讀檔一致
+        let mut store = LoginStore::default();
+        assert!(!store.is_logged_in("a01@aiapi.tw"));
+        store.mark("a01@aiapi.tw");
+        assert!(store.is_logged_in("a01@aiapi.tw"));
+        let path = std::env::temp_dir().join("login-store-test.json");
+        store.save(&path).unwrap();
+        let loaded = LoginStore::load(&path);
+        assert!(loaded.is_logged_in("a01@aiapi.tw"), "讀檔後仍應標記已登入");
+        assert!(!loaded.is_logged_in("a02@aiapi.tw"));
+        let _ = std::fs::remove_file(&path);
+    }
 }
