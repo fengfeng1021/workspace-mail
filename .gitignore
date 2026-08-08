@@ -8,3 +8,4 @@ wm-automation-config.json
 wm-fingerprints.json
 # 持久 Chrome profile（登入 cookie、指紋，不進 repo）
 /wm-profiles
+wm-account-usage.json
