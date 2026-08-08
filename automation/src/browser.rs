@@ -214,3 +214,151 @@ async fn type_text(
     }
     Ok(())
 }
+
+/// 依文字點擊按鈕（Google 登入頁的下一步/登入按鈕無穩定 id，用文字匹配）
+async fn click_button_by_text(page: &Page, text: &str) -> Result<()> {
+    let js = format!(
+        "(() => {{ const btn = [...document.querySelectorAll('button')].find(b => (b.innerText||'').trim().includes({txt:?})); if (!btn) return false; btn.click(); return true; }})()",
+        txt = text
+    );
+    let result = page
+        .evaluate_expression(&js)
+        .await
+        .map_err(|e| anyhow!("點擊「{}」失敗: {}", text, e))?;
+    if result.value() != Some(&serde_json::Value::Bool(true)) {
+        return Err(anyhow!("找不到「{}」按鈕", text));
+    }
+    Ok(())
+}
+
+/// 輪詢等待 selector 出現（最多 timeout 秒）
+async fn wait_for_selector(page: &Page, selector: &str, timeout_secs: u64) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if page.find_element(selector).await.is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(anyhow!("等待元素 {} 超時（{} 秒）", selector, timeout_secs));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// 登入 Google 結果
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoginResult {
+    /// 登入成功（cookie 已存入持久 profile）
+    Success,
+    /// 需要人工處理（驗證碼／裝置驗證等）
+    NeedManual(String),
+}
+
+/// 登入 Google 帳號（一次即可，cookie 存入持久 profile，之後開瀏覽器自動帶入登入狀態）
+pub async fn login_google_task(
+    chrome_path: String,
+    index: usize,
+    email: String,
+    password: String,
+    profile_dir: PathBuf,
+    log: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<LoginResult> {
+    let tag = format!("[{} {}]", index, email);
+    let _ = log.send(format!("{} 🔑 開始登入 Google…", tag));
+
+    let mut fp_store = crate::fingerprint::FingerprintStore::default();
+    let fp = fp_store.get_or_create(&email);
+
+    let config = build_browser_config(&chrome_path, &profile_dir, &fp)?;
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|e| anyhow!("Chrome 啟動失敗: {}", e))?;
+    tokio::spawn(async move {
+        while handler.next().await.is_some() {}
+    });
+
+    let result = async {
+        let page = browser
+            .new_page("https://accounts.google.com")
+            .await
+            .map_err(|e| anyhow!("開啟登入頁失敗: {}", e))?;
+        apply_fingerprint(&page, &fp).await?;
+
+        // 1. 等 email 欄位
+        wait_for_selector(&page, "#identifierId", 20).await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        type_text(&page, "#identifierId", &email).await?;
+        let _ = log.send(format!("{} 已填入帳號 {}", tag, email));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        click_button_by_text(&page, "下一步").await?;
+
+        // 2. 等密碼欄位
+        wait_for_selector(&page, "input[name=Passwd]", 15).await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        type_text(&page, "input[name=Passwd]", &password).await?;
+        let _ = log.send(format!("{} 已填入密碼", tag));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        click_button_by_text(&page, "下一步").await?;
+
+        // 3. 等待登入結果
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let url = page
+            .url()
+            .await
+            .map_err(|e| anyhow!("讀取頁面狀態失敗: {}", e))?
+            .unwrap_or_default();
+
+        // 錯誤訊息檢查（密碼錯誤／帳號問題）
+        let err_js = r#"(() => { const el = document.querySelector('[role=alert], .error, [jsname="B34EJ"]'); return el ? el.innerText.slice(0, 100) : ''; })()"#;
+        if let Ok(res) = page.evaluate_expression(err_js).await {
+            if let Some(v) = res.value() {
+                if let Some(msg) = v.as_str() {
+                    if !msg.is_empty() && url.contains("accounts.google.com") {
+                        return Err(anyhow!("登入被拒：{}", msg));
+                    }
+                }
+            }
+        }
+
+        // 驗證碼／裝置驗證偵測（仍在 accounts.google.com 且沒有跳到正常頁）
+        if url.contains("accounts.google.com") {
+            let captcha_js = r#"(() => {
+                const captcha = !!document.querySelector('iframe[src*="recaptcha"], #captcha, [jsname*="captcha"]');
+                const challenge = (document.body.innerText||'').includes('这是你吗') || (document.body.innerText||'').includes('這是你嗎');
+                const verify = (document.body.innerText||'').includes('验证码') || (document.body.innerText||'').includes('驗證碼');
+                return captcha || challenge || verify;
+            })()"#;
+            if let Ok(res) = page.evaluate_expression(captcha_js).await {
+                if res.value().and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return Ok(LoginResult::NeedManual(
+                        "偵測到驗證碼／裝置驗證，請在開啟的瀏覽器完成後再關閉".to_string(),
+                    ));
+                }
+            }
+            return Ok(LoginResult::NeedManual(
+                "登入頁未完成跳轉，請檢查開啟的瀏覽器並手動完成".to_string(),
+            ));
+        }
+
+        let _ = log.send(format!("{} ✅ 登入成功（cookie 已存入 profile）", tag));
+        Ok(LoginResult::Success)
+    }
+    .await;
+
+    match &result {
+        Ok(LoginResult::Success) => {
+            // 登入成功：cookie 已寫入持久 profile，關閉瀏覽器（下次開自動帶入）
+            let _ = browser.close().await;
+        }
+        Ok(LoginResult::NeedManual(msg)) => {
+            // 需人工：保持瀏覽器開啟，使用者處理後手動關閉
+            let _ = log.send(format!("{} ⚠️ {}（處理完手動關閉視窗）", tag, msg));
+            std::mem::forget(browser);
+        }
+        Err(e) => {
+            let _ = log.send(format!("{} ❌ {}", tag, e));
+            let _ = browser.close().await;
+        }
+    }
+    result
+}

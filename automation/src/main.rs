@@ -16,6 +16,7 @@ use usage::{AccountStatus, UsageStore};
 const CONFIG_FILE: &str = "wm-automation-config.json";
 const FINGERPRINT_FILE: &str = "wm-fingerprints.json";
 const USAGE_FILE: &str = "wm-account-usage.json";
+const LOGINS_FILE: &str = "wm-logins.json";
 /// 持久 Chrome profile 儲存位置：Workspace-Mail 專案目錄下（隨專案走，統一管理）
 const PROFILE_ROOT: &str = r"D:\Desktop\App\Workspace-Mail\wm-profiles";
 
@@ -110,6 +111,38 @@ fn fingerprint_path() -> PathBuf {
 fn usage_path() -> PathBuf {
     exe_dir().join(USAGE_FILE)
 }
+fn logins_path() -> PathBuf {
+    exe_dir().join(LOGINS_FILE)
+}
+
+/// 登入狀態標記（email → 登入成功時間）
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct LoginStore {
+    map: std::collections::HashMap<String, u64>,
+}
+
+impl LoginStore {
+    fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self, path: &std::path::Path) -> Result<(), anyhow::Error> {
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+    fn mark(&mut self, email: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.map.insert(email.to_string(), now);
+    }
+    fn is_logged_in(&self, email: &str) -> bool {
+        self.map.contains_key(email)
+    }
+}
 fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .unwrap_or_default()
@@ -158,6 +191,7 @@ struct WmApp {
     cfg: AppConfig,
     fingerprints: FingerprintStore,
     usage: UsageStore,
+    logins: LoginStore,
     domains: Vec<String>,
     accounts: Vec<Account>,
     selected: HashSet<String>,
@@ -193,6 +227,7 @@ impl WmApp {
             cfg,
             fingerprints: FingerprintStore::load(&fingerprint_path()),
             usage: UsageStore::load(&usage_path()),
+            logins: LoginStore::load(&logins_path()),
             domains: Vec::new(),
             accounts: Vec::new(),
             selected: HashSet::new(),
@@ -246,6 +281,12 @@ impl WmApp {
                     self.domains = list;
                     self.status = format!("已載入 {} 個域名", n);
                 }
+                continue;
+            }
+            if let Some(email) = msg.strip_prefix("__LOGINED__") {
+                self.logins.mark(email);
+                let _ = self.logins.save(&logins_path());
+                self.log(format!("🔑 {} 登入成功（已儲存，之後開瀏覽器自動帶入）", email));
                 continue;
             }
             if let Some(as_) = msg.strip_prefix("__ACCOUNTS__") {
@@ -416,6 +457,50 @@ impl WmApp {
         self.launch_task(vec![acc.clone()]);
     }
 
+    /// 批次登入 Google（對勾選帳號執行一次登入，cookie 存入持久 profile）
+    fn launch_login(&mut self, accounts: Vec<Account>) {
+        if accounts.is_empty() {
+            self.status = "⚠️ 沒有勾選的帳號".into();
+            return;
+        }
+        let chrome_path = self.cfg.chrome_path.clone();
+        let tx = self.log_tx.clone();
+        let rt = self.rt.handle().clone();
+        self.status = format!("🔑 開始登入：共 {} 個帳號", accounts.len());
+        self.log(format!("🔑 開始登入 {} 個帳號（登入一次，之後開瀏覽器自動帶入）", accounts.len()));
+
+        // 確保指紋存在
+        let mut fp_store = self.fingerprints.clone();
+        for acc in &accounts {
+            fp_store.get_or_create(&acc.email);
+        }
+        let _ = fp_store.save(&fingerprint_path());
+
+        rt.spawn(async move {
+            for (i, acc) in accounts.into_iter().enumerate() {
+                let profile_dir = profile_dir_for(&acc.email);
+                let tx = tx.clone();
+                let chrome_path = chrome_path.clone();
+                let r = browser::login_google_task(
+                    chrome_path, i, acc.email.clone(), acc.password, profile_dir, tx.clone(),
+                )
+                .await;
+                match r {
+                    Ok(browser::LoginResult::Success) => {
+                        let _ = tx.send(format!("__LOGINED__{}", acc.email));
+                    }
+                    Ok(browser::LoginResult::NeedManual(msg)) => {
+                        let _ = tx.send(format!("⚠️ {} 需人工處理：{}", acc.email, msg));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(format!("❌ {} 登入失敗：{}", acc.email, e));
+                    }
+                }
+            }
+            let _ = tx.send("🏁 登入批次結束".to_string());
+        });
+    }
+
     fn spawn_firestore_job(&mut self) {
         let mut client = FirestoreClient::new(self.cfg.firebase.clone());
         let tx = self.log_tx.clone();
@@ -566,6 +651,20 @@ impl eframe::App for WmApp {
                     if ui.small_button("✖ 清除").on_hover_text("取消所有勾選").clicked() {
                         self.selected.clear();
                     }
+                    ui.separator();
+                    if ui
+                        .small_button("🔑 登入勾選")
+                        .on_hover_text("對勾選的帳號執行 Google 登入（一次即可，之後開瀏覽器自動帶入登入狀態）")
+                        .clicked()
+                    {
+                        let to_login: Vec<Account> = self
+                            .accounts
+                            .iter()
+                            .filter(|a| self.selected.contains(&a.email))
+                            .cloned()
+                            .collect();
+                        self.launch_login(to_login);
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0).hint_text("搜尋帳號…"));
@@ -676,6 +775,10 @@ impl eframe::App for WmApp {
                                                 }
                                             }
                                             ui.label(&acc.email);
+                                            if self.logins.is_logged_in(&acc.email) {
+                                                ui.colored_label(colors::INFO, "🔑 已登入")
+                                                    .on_hover_text("已完成 Google 登入，開瀏覽器自動帶入登入狀態");
+                                            }
                                             match status {
                                                 AccountStatus::Available => {
                                                     ui.colored_label(colors::SUCCESS, "✅ 可用")
