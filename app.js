@@ -5,7 +5,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, collection, doc, addDoc, setDoc, getDocs, query, where,
-  orderBy, deleteDoc, onSnapshot, writeBatch
+  deleteDoc, onSnapshot, writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // ========== 設定區（Firebase 建立好後填入） ==========
@@ -155,11 +155,12 @@ async function deleteDomain(d) {
 function loadAccounts(domain) {
   const q = query(
     collection(db, "accounts"),
-    where("domain", "==", domain),
-    orderBy("sortKey", "asc")
+    where("domain", "==", domain)
   );
   onSnapshot(q, (snap) => {
-    allAccounts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // 客戶端排序（避免 Firestore 複合索引需求）
+    allAccounts = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.sortKey || a.account.toLowerCase()).localeCompare(b.sortKey || b.account.toLowerCase()));
     renderAccounts();
   });
 }
