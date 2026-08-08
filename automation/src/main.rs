@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const CONFIG_FILE: &str = "wm-automation-config.json";
 const FINGERPRINT_FILE: &str = "wm-fingerprints.json";
-const PROFILE_ROOT: &str = r"D:\wm-profiles";
+/// 持久 Chrome profile 儲存位置：Workspace-Mail 專案目錄下（隨專案走，統一管理）
+const PROFILE_ROOT: &str = r"D:\Desktop\App\Workspace-Mail\wm-profiles";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppConfig {
@@ -69,6 +70,29 @@ fn profile_dir_for(email: &str) -> PathBuf {
     PathBuf::from(PROFILE_ROOT).join(local)
 }
 
+/// 載入中文字體（egui 預設字體不含中文，會顯示為方塊）
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    // 優先 Microsoft JhengHei（正黑體，繁中），fallback 雅黑/黑體
+    let candidates = [
+        r"C:\Windows\Fonts\msjh.ttc",
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+    ];
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("cjk".to_owned(), egui::FontData::from_owned(data));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.get_mut(&family).unwrap().push("cjk".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            return;
+        }
+    }
+}
+
 struct WmApp {
     cfg: AppConfig,
     fingerprints: FingerprintStore,
@@ -86,7 +110,10 @@ struct WmApp {
 }
 
 impl WmApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // egui 預設字體不含中文，載入系統正黑體
+        setup_fonts(&cc.egui_ctx);
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let cfg = std::fs::read_to_string(config_path())
             .ok()
