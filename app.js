@@ -111,17 +111,30 @@ function selectDomain(name) {
 }
 
 // ---------- 新增域名 ----------
-$("add-domain-btn").addEventListener("click", async () => {
-  const name = prompt("輸入域名（例如 example.com）：");
-  if (!name || !name.trim()) return;
-  const n = name.trim().toLowerCase();
-  if (allDomains.some(d => d.name === n)) { toast("該域名已存在", "err"); return; }
-  await addDoc(collection(db, "domains"), { name: n, createdAt: Date.now() });
-  toast("域名已新增");
+$("add-domain-btn").addEventListener("click", () => {
+  $("domain-input").value = "";
+  $("domain-msg").textContent = "";
+  $("domain-modal").classList.remove("hidden");
+  $("domain-input").focus();
+});
+$("domain-cancel").addEventListener("click", () => $("domain-modal").classList.add("hidden"));
+$("domain-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("domain-save").click(); });
+$("domain-save").addEventListener("click", async () => {
+  const msg = $("domain-msg");
+  const name = $("domain-input").value.trim().toLowerCase();
+  if (!name) { msg.className = "msg err"; msg.textContent = "請輸入域名"; return; }
+  if (allDomains.some(d => d.name === name)) { msg.className = "msg err"; msg.textContent = "該域名已存在"; return; }
+  try {
+    await addDoc(collection(db, "domains"), { name, createdAt: Date.now() });
+    $("domain-modal").classList.add("hidden");
+    toast("域名已新增");
+  } catch (e) {
+    msg.className = "msg err"; msg.textContent = "失敗：" + e.message;
+  }
 });
 
 async function deleteDomain(d) {
-  if (!confirm(`確定刪除域名「${d.name}」以及底下所有帳號？`)) return;
+  if (!await confirmDialog(`確定刪除域名「${d.name}」以及底下所有帳號？`)) return;
   // 刪除該域名所有帳號
   const q = query(collection(db, "accounts"), where("domain", "==", d.name));
   const snap = await getDocs(q);
@@ -214,7 +227,7 @@ function togglePw(id, pw) {
 
 // ---------- 刪除帳號 ----------
 async function deleteAccount(acc) {
-  if (!confirm(`確定刪除 ${acc.account}？`)) return;
+  if (!await confirmDialog(`確定刪除 ${acc.account}？`)) return;
   await deleteDoc(doc(db, "accounts", acc.id));
   toast("已刪除", "ok");
 }
@@ -232,7 +245,7 @@ $("select-all").addEventListener("change", (e) => {
 $("delete-selected-btn").addEventListener("click", async () => {
   const ids = [...document.querySelectorAll(".row-check:checked")].map(c => c.dataset.id);
   if (!ids.length) return;
-  if (!confirm(`確定刪除所選 ${ids.length} 個帳號？`)) return;
+  if (!await confirmDialog(`確定刪除所選 ${ids.length} 個帳號？`)) return;
   const batch = writeBatch(db);
   ids.forEach(id => batch.delete(doc(db, "accounts", id)));
   await batch.commit();
@@ -365,6 +378,21 @@ $("search-box").addEventListener("input", (e) => {
   searchTerm = e.target.value;
   renderAccounts();
 });
+
+// ---------- 通用確認 Modal ----------
+let confirmResolve = null;
+function confirmDialog(text, title = "確認") {
+  $("confirm-title").textContent = title;
+  $("confirm-text").textContent = text;
+  $("confirm-modal").classList.remove("hidden");
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
+function closeConfirm(result) {
+  $("confirm-modal").classList.add("hidden");
+  if (confirmResolve) { confirmResolve(result); confirmResolve = null; }
+}
+$("confirm-yes").addEventListener("click", () => closeConfirm(true));
+$("confirm-no").addEventListener("click", () => closeConfirm(false));
 
 // ---------- Toast ----------
 let toastTimer = null;

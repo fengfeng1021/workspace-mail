@@ -73,6 +73,32 @@
   </div>
 </div>
 
+<!-- ===== 新增域名 Modal ===== -->
+<div id="domain-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3>新增域名</h3>
+    <label>域名（例如 example.com）</label>
+    <input type="text" id="domain-input" placeholder="example.com">
+    <div class="modal-actions">
+      <button id="domain-save" class="btn primary">新增</button>
+      <button id="domain-cancel" class="btn ghost">取消</button>
+    </div>
+    <div id="domain-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ===== 通用確認 Modal ===== -->
+<div id="confirm-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="confirm-title">確認</h3>
+    <p id="confirm-text" class="hint"></p>
+    <div class="modal-actions">
+      <button id="confirm-yes" class="btn danger">確定</button>
+      <button id="confirm-no" class="btn ghost">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== 新增/編輯帳號 Modal ===== -->
 <div id="account-modal" class="modal hidden">
   <div class="modal-card">
