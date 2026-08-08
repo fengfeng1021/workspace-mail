@@ -1,0 +1,10 @@
+# 敏感交接文件：含密碼/金鑰，只限本機，勿提交到公開 repo（GitHub Pages 會自動部署）
+WORKSPACE-MAIL-HANDOFF.md
+# Rust 編譯產物
+/automation/target
+# 執行時產生的設定（含登入資訊）
+config.json
+wm-automation-config.json
+wm-fingerprints.json
+# 持久 Chrome profile（登入 cookie、指紋，不進 repo）
+/wm-profiles

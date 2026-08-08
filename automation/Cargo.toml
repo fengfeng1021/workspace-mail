@@ -1,0 +1,20 @@
+[package]
+name = "workspace-mail-automation"
+version = "0.1.0"
+edition = "2021"
+description = "Workspace Mail 批量自動化：多無痕瀏覽器自動填表送出"
+
+[dependencies]
+eframe = "0.27"
+egui = "0.27"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chromiumoxide = "0.7"
+anyhow = "1"
+chrono = "0.4"
+futures = "0.3"
+
+[profile.release]
+opt-level = 2
