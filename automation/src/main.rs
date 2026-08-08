@@ -19,6 +19,27 @@ const USAGE_FILE: &str = "wm-account-usage.json";
 /// 持久 Chrome profile 儲存位置：Workspace-Mail 專案目錄下（隨專案走，統一管理）
 const PROFILE_ROOT: &str = r"D:\Desktop\App\Workspace-Mail\wm-profiles";
 
+/// 色彩系統（品牌統一：一處定義，全 UI 使用）
+mod colors {
+    use egui::Color32;
+    // 品牌主色
+    pub const PRIMARY: Color32 = Color32::from_rgb(79, 140, 255);
+    // 語義色
+    pub const SUCCESS: Color32 = Color32::from_rgb(80, 220, 120);
+    pub const WARNING: Color32 = Color32::from_rgb(240, 170, 60);
+    pub const ERROR: Color32 = Color32::from_rgb(235, 87, 87);
+    pub const INFO: Color32 = Color32::from_rgb(120, 170, 230);
+    // 中性色（深色主題）
+    pub const BG: Color32 = Color32::from_rgb(20, 24, 34);
+    pub const PANEL: Color32 = Color32::from_rgb(27, 32, 45);
+    pub const PANEL_ALT: Color32 = Color32::from_rgb(34, 40, 56);
+    pub const BORDER: Color32 = Color32::from_rgb(48, 56, 78);
+    pub const TEXT: Color32 = Color32::from_rgb(220, 225, 235);
+    pub const TEXT_WEAK: Color32 = Color32::from_rgb(150, 158, 175);
+    // 間距系統（8px 節奏）
+    pub const SPACE: f32 = 8.0;
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppConfig {
     firebase: FirebaseConfig,
@@ -442,19 +463,89 @@ enum FirestoreJob {
 
 impl eframe::App for WmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ===== 深色主題（品牌統一） =====
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = colors::PANEL;
+        visuals.window_fill = colors::BG;
+        visuals.extreme_bg_color = colors::BG;
+        visuals.faint_bg_color = colors::PANEL_ALT;
+        visuals.override_text_color = Some(colors::TEXT);
+        visuals.selection.bg_fill = colors::PRIMARY;
+        visuals.widgets.inactive.bg_fill = colors::PANEL_ALT;
+        visuals.widgets.inactive.weak_bg_fill = colors::PANEL_ALT;
+        visuals.widgets.hovered.bg_fill = colors::PANEL_ALT;
+        visuals.widgets.hovered.weak_bg_fill = colors::BORDER;
+        visuals.widgets.active.bg_fill = colors::BORDER;
+        visuals.widgets.noninteractive.bg_fill = colors::PANEL_ALT;
+        visuals.widgets.noninteractive.weak_bg_fill = colors::PANEL;
+        visuals.widgets.inactive.fg_stroke.color = colors::TEXT;
+        ctx.set_visuals(visuals);
+
+        // ===== 快捷鍵（Nielsen 7：彈性與效率） =====
+        let (ctrl_s, ctrl_e, esc) = (
+            ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)),
+            ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::E)),
+            ctx.input(|i| i.key_pressed(egui::Key::Escape)),
+        );
+        if ctrl_s {
+            self.save_config();
+            self.status = "✅ 設定已儲存（Ctrl+S）".into();
+        }
+        if ctrl_e {
+            if self.running {
+                self.status = "⚠️ 已有任務執行中（Esc 停止）".into();
+            } else {
+                self.start_selected();
+            }
+        }
+        if esc && self.running {
+            self.stopping.store(true, Ordering::SeqCst);
+            self.status = "停止中…（Esc）".into();
+        }
+
         self.drain_logs();
 
         // ===== 頂部狀態列 =====
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(colors::SPACE);
             ui.horizontal(|ui| {
-                ui.heading("📮 Workspace Mail 自動化");
+                ui.heading(egui::RichText::new("📮 Workspace Mail 自動化").color(colors::TEXT));
                 ui.separator();
-                ui.label(format!("狀態：{}", self.status));
+                // 狀態帶語義色（Nielsen 1：狀態可見）
+                let status_color = if self.running {
+                    colors::INFO
+                } else if self.status.starts_with("✅") || self.status.starts_with("已") {
+                    colors::SUCCESS
+                } else if self.status.starts_with("⚠️") {
+                    colors::WARNING
+                } else if self.status.starts_with("❌") || self.status.starts_with("⏹") {
+                    colors::ERROR
+                } else {
+                    colors::TEXT_WEAK
+                };
+                ui.label(egui::RichText::new(format!("狀態：{}", self.status)).color(status_color));
                 ui.separator();
-                ui.label(format!("進度：{}/{}", self.done_count, self.total_count));
+                if self.running {
+                    // 執行中進度條（Nielsen 1）
+                    let frac = if self.total_count > 0 {
+                        self.done_count as f32 / self.total_count as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .desired_width(200.0)
+                            .text(format!("{}/{}", self.done_count, self.total_count))
+                            .fill(colors::PRIMARY),
+                    );
+                } else {
+                    ui.label(egui::RichText::new(format!("進度：{}/{}", self.done_count, self.total_count)).weak());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("Ctrl+S 儲存 · Ctrl+E 執行 · Esc 停止").weak());
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(colors::SPACE);
         });
 
         // ===== 底部 log =====
@@ -480,15 +571,15 @@ impl eframe::App for WmApp {
             .resizable(true)
             .default_width(430.0)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(colors::SPACE);
                 ui.horizontal(|ui| {
                     ui.strong(format!("帳號列表（{}）", self.accounts.len()));
-                    if ui.small_button("全選").clicked() {
+                    if ui.small_button("全選").on_hover_text("選取全部帳號").clicked() {
                         for a in &self.accounts {
                             self.selected.insert(a.email.clone());
                         }
                     }
-                    if ui.small_button("清空選取").clicked() {
+                    if ui.small_button("清空選取").on_hover_text("取消所有勾選").clicked() {
                         self.selected.clear();
                     }
                 });
@@ -501,10 +592,16 @@ impl eframe::App for WmApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("圖例:");
-                    ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "✅ 可用");
-                    ui.colored_label(egui::Color32::from_rgb(240, 170, 60), "⏳ 冷卻中");
+                    ui.colored_label(colors::SUCCESS, "✅ 可用")
+                        .on_hover_text("未使用或已過冷卻時間");
+                    ui.colored_label(colors::WARNING, "⏳ 冷卻中")
+                        .on_hover_text("使用過，等待冷卻結束才能再用");
                     ui.separator();
-                    if ui.small_button("🗑 標記勾選為已使用").clicked() {
+                    if ui
+                        .small_button("🗑 標記勾選為已使用")
+                        .on_hover_text("把勾選的帳號標記為已使用（進入冷卻）")
+                        .clicked()
+                    {
                         let n = self.selected.len();
                         for e in self.selected.iter() {
                             self.usage.mark_used(e);
@@ -538,17 +635,23 @@ impl eframe::App for WmApp {
                             ui.label(&acc.email);
                             match status {
                                 AccountStatus::Available => {
-                                    ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "✅ 可用");
+                                    ui.colored_label(colors::SUCCESS, "✅ 可用")
+                                        .on_hover_text("可以執行");
                                 }
                                 AccountStatus::Cooling { remain_min } => {
                                     ui.colored_label(
-                                        egui::Color32::from_rgb(240, 170, 60),
+                                        colors::WARNING,
                                         format!("⏳ 冷卻 {}m", remain_min),
-                                    );
+                                    )
+                                    .on_hover_text("等待冷卻結束才能再用");
                                 }
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("▶ 單開").clicked() {
+                                if ui
+                                    .small_button("▶ 單開")
+                                    .on_hover_text("只執行這一個帳號")
+                                    .clicked()
+                                {
                                     let acc = acc.clone();
                                     self.run_single(&acc);
                                 }
@@ -671,31 +774,73 @@ impl eframe::App for WmApp {
 
                 ui.separator();
 
-                // 執行控制
+                // 執行控制（主動作：大而醒目——Fitts）
+                ui.add_space(colors::SPACE);
                 ui.horizontal(|ui| {
                     let sel_n = self.selected.len();
                     if !self.running {
-                        if ui.button(egui::RichText::new(format!("▶ 執行勾選（{}）", sel_n)).size(16.0)).clicked() {
+                        let label = if sel_n > 0 {
+                            format!("▶ 執行勾選（{}）", sel_n)
+                        } else {
+                            "▶ 執行勾選（請先勾選帳號）".into()
+                        };
+                        let btn = egui::Button::new(
+                            egui::RichText::new(label).size(17.0).color(colors::TEXT),
+                        )
+                        .fill(colors::PRIMARY)
+                        .min_size(egui::vec2(220.0, 44.0))
+                        .rounding(6.0);
+                        if ui
+                            .add(btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("執行勾選且可用的帳號（Ctrl+E）")
+                            .clicked()
+                        {
                             self.start_selected();
                         }
                     } else {
-                        if ui.button(egui::RichText::new("⏹ 停止").size(16.0)).clicked() {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("⏹ 停止").size(17.0).color(colors::TEXT),
+                        )
+                        .fill(colors::ERROR)
+                        .min_size(egui::vec2(120.0, 44.0))
+                        .rounding(6.0);
+                        if ui
+                            .add(btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("停止啟動新的實例（Esc）")
+                            .clicked()
+                        {
                             self.stopping.store(true, Ordering::SeqCst);
                             self.status = "停止中…".into();
                         }
                     }
-                    if ui.button("儲存設定").clicked() {
+                    ui.add_space(colors::SPACE);
+                    if ui
+                        .button("💾 儲存設定")
+                        .on_hover_text("儲存全部設定（Ctrl+S）")
+                        .clicked()
+                    {
                         self.save_config();
-                        self.status = "設定已儲存".into();
+                        self.status = "✅ 設定已儲存".into();
                     }
                 });
-                ui.label(egui::RichText::new("提示：勾選要執行的帳號 → 執行勾選；或點帳號右側「▶ 單開」只跑一個。").weak());
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("提示：勾選要執行的帳號 → 執行勾選；或點帳號右側「▶ 單開」只跑一個。")
+                        .weak(),
+                );
                 ui.add_space(8.0);
             });
         });
 
-        // 每秒刷新（冷卻倒數即時更新）
-        ctx.request_repaint_after(std::time::Duration::from_millis(1000));
+        // 刷新節奏（動效：執行中 250ms 讓進度條流暢；閒置 1s 讓冷卻倒數更新）
+        let refresh = if self.running {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_millis(1000)
+        };
+        ctx.request_repaint_after(refresh);
     }
 }
 
