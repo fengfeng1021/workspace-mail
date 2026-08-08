@@ -194,3 +194,69 @@ mod rand_simple_fixed {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_account_fixed_fingerprint() {
+        let mut store = FingerprintStore::default();
+        let fp1 = store.get_or_create("a01@aiapi.tw");
+        let fp2 = store.get_or_create("a01@aiapi.tw");
+        assert_eq!(fp1.user_agent, fp2.user_agent);
+        assert_eq!(fp1.noise_seed, fp2.noise_seed);
+        assert_eq!(fp1.width, fp2.width);
+    }
+
+    #[test]
+    fn different_accounts_differ() {
+        let mut store = FingerprintStore::default();
+        let fp1 = store.get_or_create("a01@aiapi.tw");
+        let fp2 = store.get_or_create("a02@aiapi.tw");
+        assert_ne!(fp1.user_agent, fp2.user_agent);
+        assert_ne!(fp1.noise_seed, fp2.noise_seed);
+    }
+
+    #[test]
+    fn taiwan_timezone_and_language_fixed() {
+        let mut store = FingerprintStore::default();
+        for email in ["a01@aiapi.tw", "a02@aiapi.tw", "a03@aiapi.tw"] {
+            let fp = store.get_or_create(email);
+            assert_eq!(fp.timezone, "Asia/Taipei");
+            assert_eq!(fp.locale, "zh-TW");
+            assert!(fp.accept_language.starts_with("zh-TW"));
+        }
+    }
+
+    #[test]
+    fn user_agent_shape_valid() {
+        let mut store = FingerprintStore::default();
+        let fp = store.get_or_create("a01@aiapi.tw");
+        assert!(fp.user_agent.contains("Windows NT 10.0"));
+        assert!(fp.user_agent.contains("Chrome/"));
+        assert!(fp.user_agent.contains("Safari/537.36"));
+    }
+
+    #[test]
+    fn store_roundtrip_persists() {
+        let mut store = FingerprintStore::default();
+        store.get_or_create("a01@aiapi.tw");
+        let path = std::env::temp_dir().join("fp-test-roundtrip.json");
+        store.save(&path).unwrap();
+        let mut loaded = FingerprintStore::load(&path);
+        let fp = loaded.get_or_create("a01@aiapi.tw");
+        assert_eq!(fp.user_agent, store.get_or_create("a01@aiapi.tw").user_agent);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fingerprint_js_contains_expected_overrides() {
+        let mut store = FingerprintStore::default();
+        let fp = store.get_or_create("a01@aiapi.tw");
+        let js = fingerprint_js(&fp);
+        assert!(js.contains("hardwareConcurrency"));
+        assert!(js.contains("zh-TW"));
+        assert!(js.contains("getImageData"));
+    }
+}

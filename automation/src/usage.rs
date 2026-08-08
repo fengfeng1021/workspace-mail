@@ -79,3 +79,54 @@ impl UsageStore {
         self.status(email, cooldown_min) == AccountStatus::Available
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unused_account_is_available() {
+        let store = UsageStore::default();
+        assert_eq!(store.status("a01@aiapi.tw", 30), AccountStatus::Available);
+        assert!(store.is_available("a01@aiapi.tw", 30));
+    }
+
+    #[test]
+    fn marked_account_enters_cooldown() {
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        match store.status("a01@aiapi.tw", 30) {
+            AccountStatus::Cooling { remain_min } => {
+                assert!((29..=30).contains(&remain_min), "剩餘應約 30m，得到 {}", remain_min);
+            }
+            s => panic!("應為冷卻中，得到 {:?}", s),
+        }
+        assert!(!store.is_available("a01@aiapi.tw", 30));
+    }
+
+    #[test]
+    fn cooldown_zero_means_always_available() {
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        assert!(store.is_available("a01@aiapi.tw", 0));
+    }
+
+    #[test]
+    fn others_unaffected_by_single_mark() {
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        assert!(store.is_available("a02@aiapi.tw", 30));
+    }
+
+    #[test]
+    fn save_load_roundtrip() {
+        let mut store = UsageStore::default();
+        store.mark_used("a01@aiapi.tw");
+        let path = std::env::temp_dir().join("usage-test-roundtrip.json");
+        store.save(&path).unwrap();
+        let loaded = UsageStore::load(&path);
+        assert!(!loaded.is_available("a01@aiapi.tw", 30));
+        assert!(loaded.is_available("a02@aiapi.tw", 30));
+        let _ = std::fs::remove_file(&path);
+    }
+}
