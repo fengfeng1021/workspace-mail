@@ -2,16 +2,20 @@
 mod browser;
 mod fingerprint;
 mod firestore;
+mod usage;
 
 use browser::{FieldAction, TaskConfig};
 use fingerprint::FingerprintStore;
 use firestore::{Account, FirebaseConfig, FirestoreClient};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use usage::{AccountStatus, UsageStore};
 
 const CONFIG_FILE: &str = "wm-automation-config.json";
 const FINGERPRINT_FILE: &str = "wm-fingerprints.json";
+const USAGE_FILE: &str = "wm-account-usage.json";
 /// 持久 Chrome profile 儲存位置：Workspace-Mail 專案目錄下（隨專案走，統一管理）
 const PROFILE_ROOT: &str = r"D:\Desktop\App\Workspace-Mail\wm-profiles";
 
@@ -26,6 +30,12 @@ struct AppConfig {
     wait_after_ms: u64,
     step_delay_ms: u64,
     parallel: usize,
+    /// 冷卻開關
+    cooldown_enabled: bool,
+    /// 冷卻分鐘數（自訂）
+    cooldown_minutes: u64,
+    /// 執行成功後自動標記已使用
+    auto_mark_used: bool,
 }
 
 impl Default for AppConfig {
@@ -48,20 +58,28 @@ impl Default for AppConfig {
             wait_after_ms: 3000,
             step_delay_ms: 500,
             parallel: 5,
+            cooldown_enabled: true,
+            cooldown_minutes: 30,
+            auto_mark_used: true,
         }
     }
 }
 
 fn config_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    dir.join(CONFIG_FILE)
+    exe_dir().join(CONFIG_FILE)
 }
-
 fn fingerprint_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    dir.join(FINGERPRINT_FILE)
+    exe_dir().join(FINGERPRINT_FILE)
+}
+fn usage_path() -> PathBuf {
+    exe_dir().join(USAGE_FILE)
+}
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default()
 }
 
 /// 帳號對應的持久 profile 目錄（一次登入永久有效）
@@ -73,7 +91,6 @@ fn profile_dir_for(email: &str) -> PathBuf {
 /// 載入中文字體（egui 預設字體不含中文，會顯示為方塊）
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    // 優先 Microsoft JhengHei（正黑體，繁中），fallback 雅黑/黑體
     let candidates = [
         r"C:\Windows\Fonts\msjh.ttc",
         r"C:\Windows\Fonts\msyh.ttc",
@@ -93,11 +110,23 @@ fn setup_fonts(ctx: &egui::Context) {
     }
 }
 
+/// 帳號篩選
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccFilter {
+    All,
+    Available,
+    Cooling,
+}
+
 struct WmApp {
     cfg: AppConfig,
     fingerprints: FingerprintStore,
+    usage: UsageStore,
     domains: Vec<String>,
     accounts: Vec<Account>,
+    selected: HashSet<String>,
+    search: String,
+    filter: AccFilter,
     logs: Vec<String>,
     status: String,
     running: bool,
@@ -111,7 +140,6 @@ struct WmApp {
 
 impl WmApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // egui 預設字體不含中文，載入系統正黑體
         setup_fonts(&cc.egui_ctx);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -128,8 +156,12 @@ impl WmApp {
         let mut app = Self {
             cfg,
             fingerprints: FingerprintStore::load(&fingerprint_path()),
+            usage: UsageStore::load(&usage_path()),
             domains: Vec::new(),
             accounts: Vec::new(),
+            selected: HashSet::new(),
+            search: String::new(),
+            filter: AccFilter::All,
             logs: Vec::new(),
             status: "就緒".into(),
             running: false,
@@ -154,7 +186,6 @@ impl WmApp {
 
     fn drain_logs(&mut self) {
         while let Ok(msg) = self.log_rx.try_recv() {
-            // 特殊訊息：進度
             if let Some(n) = msg.strip_prefix("__DONE__") {
                 if let Ok(n) = n.parse::<usize>() {
                     self.done_count = n;
@@ -162,24 +193,36 @@ impl WmApp {
                         self.running = false;
                         self.status = "✅ 全部完成".into();
                     }
-                    continue;
                 }
+                continue;
+            }
+            if let Some(email) = msg.strip_prefix("__USED__") {
+                // 執行完成自動標記已使用
+                if self.cfg.auto_mark_used {
+                    self.usage.mark_used(email);
+                    let _ = self.usage.save(&usage_path());
+                }
+                continue;
             }
             if let Some(ds) = msg.strip_prefix("__DOMAINS__") {
                 if let Ok(list) = serde_json::from_str::<Vec<String>>(ds) {
                     let n = list.len();
                     self.domains = list;
                     self.status = format!("已載入 {} 個域名", n);
-                    continue;
                 }
+                continue;
             }
             if let Some(as_) = msg.strip_prefix("__ACCOUNTS__") {
                 if let Ok(list) = serde_json::from_str::<Vec<Account>>(as_) {
                     let n = list.len();
                     self.accounts = list;
-                    self.status = format!("已載入 {} 個帳號", n);
-                    continue;
+                    for acc in &self.accounts {
+                        self.usage.ensure(&acc.email);
+                    }
+                    let _ = self.usage.save(&usage_path());
+                    self.status = format!("已載入 {} 個帳號（勾選要執行的）", n);
                 }
+                continue;
             }
             self.logs.push(msg);
         }
@@ -194,12 +237,40 @@ impl WmApp {
         }
     }
 
-    fn start_task(&mut self) {
+    fn cooldown_min(&self) -> u64 {
+        if self.cfg.cooldown_enabled { self.cfg.cooldown_minutes } else { 0 }
+    }
+
+    fn is_available(&self, email: &str) -> bool {
+        self.usage.is_available(email, self.cooldown_min())
+    }
+
+    /// 可見帳號（依搜尋 + 篩選）
+    fn visible_accounts(&self) -> Vec<&Account> {
+        let term = self.search.trim().to_lowercase();
+        self.accounts
+            .iter()
+            .filter(|a| {
+                if !term.is_empty() && !a.email.to_lowercase().contains(&term) {
+                    return false;
+                }
+                match self.filter {
+                    AccFilter::All => true,
+                    AccFilter::Available => self.is_available(&a.email),
+                    AccFilter::Cooling => !self.is_available(&a.email),
+                }
+            })
+            .collect()
+    }
+
+    /// 啟動批次任務（傳入要跑的帳號）
+    fn launch_task(&mut self, accounts: Vec<Account>) {
         if self.running {
+            self.status = "⚠️ 已有任務在執行中".into();
             return;
         }
-        if self.accounts.is_empty() {
-            self.status = "⚠️ 帳號列表是空的，請先「載入帳號」".into();
+        if accounts.is_empty() {
+            self.status = "⚠️ 沒有可執行的帳號（請勾選且需為可用狀態）".into();
             return;
         }
         if self.cfg.url.trim().is_empty() {
@@ -211,10 +282,9 @@ impl WmApp {
         self.running = true;
         self.stopping.store(false, Ordering::SeqCst);
         self.done_count = 0;
-        self.total_count = self.accounts.len();
+        self.total_count = accounts.len();
         self.status = format!("開始執行：共 {} 個帳號", self.total_count);
 
-        let accounts = self.accounts.clone();
         let task = TaskConfig {
             url: self.cfg.url.clone(),
             fields: self.cfg.fields.clone(),
@@ -228,7 +298,7 @@ impl WmApp {
         let stopping = self.stopping.clone();
         let done = Arc::new(AtomicUsize::new(0));
 
-        // 確保每個帳號都有固定指紋（一號一指紋，生成後永久不變）並保存
+        // 確保每個帳號都有固定指紋（一號一指紋）並保存
         let mut fp_store = self.fingerprints.clone();
         for acc in &accounts {
             fp_store.get_or_create(&acc.email);
@@ -238,7 +308,6 @@ impl WmApp {
 
         let rt = self.rt.handle().clone();
 
-        // 任務執行者
         {
             let tx = tx.clone();
             let done = done.clone();
@@ -259,22 +328,24 @@ impl WmApp {
                     let task = task.clone();
                     let fp = fp_store.get_or_create(&acc.email);
                     let profile_dir = profile_dir_for(&acc.email);
+                    let email = acc.email.clone();
                     handles.push(rt_worker.spawn(async move {
                         let _permit = permit;
-                        let _ = browser::run_account_task(
-                            chrome_path, i, acc.email, acc.password, acc.note, task, fp, profile_dir, tx,
+                        let r = browser::run_account_task(
+                            chrome_path, i, acc.email, acc.password, acc.note, task, fp, profile_dir, tx.clone(),
                         )
                         .await;
+                        // 成功 → 通知 UI 標記已使用
+                        if r.is_ok() {
+                            let _ = tx.send(format!("__USED__{}", email));
+                        }
                         done.fetch_add(1, Ordering::SeqCst);
                     }));
                 }
                 for h in handles {
                     let _ = h.await;
                 }
-                let _ = tx.send(format!(
-                    "🏁 全部完成（共 {} 個）",
-                    done.load(Ordering::SeqCst)
-                ));
+                let _ = tx.send(format!("🏁 全部完成（共 {} 個）", done.load(Ordering::SeqCst)));
             });
         }
 
@@ -286,14 +357,42 @@ impl WmApp {
             rt.spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    let n = done.load(Ordering::SeqCst);
-                    let _ = tx.send(format!("__DONE__{}", n));
+                    let _ = tx.send(format!("__DONE__{}", done.load(Ordering::SeqCst)));
                     if stopping.load(Ordering::SeqCst) {
                         break;
                     }
                 }
             });
         }
+    }
+
+    /// 開始執行勾選的可用帳號（批量開）
+    fn start_selected(&mut self) {
+        let to_run: Vec<Account> = self
+            .accounts
+            .iter()
+            .filter(|a| self.selected.contains(&a.email) && self.is_available(&a.email))
+            .cloned()
+            .collect();
+        let skipped = self
+            .selected
+            .iter()
+            .filter(|e| !self.is_available(e))
+            .count();
+        if skipped > 0 {
+            self.log(format!("⚠️ 跳過 {} 個冷卻中/不可用的帳號", skipped));
+        }
+        self.launch_task(to_run);
+    }
+
+    /// 單開一個帳號
+    fn run_single(&mut self, acc: &Account) {
+        if !self.is_available(&acc.email) {
+            self.status = format!("⚠️ {} 冷卻中，不可用", acc.email);
+            return;
+        }
+        self.log(format!("▶ 單開 {}", acc.email));
+        self.launch_task(vec![acc.clone()]);
     }
 
     fn spawn_firestore_job(&mut self, job: FirestoreJob) {
@@ -309,10 +408,7 @@ impl WmApp {
                     };
                     match result {
                         Ok(ds) => {
-                            let _ = tx.send(format!(
-                                "__DOMAINS__{}",
-                                serde_json::to_string(&ds).unwrap_or_default()
-                            ));
+                            let _ = tx.send(format!("__DOMAINS__{}", serde_json::to_string(&ds).unwrap_or_default()));
                         }
                         Err(e) => {
                             let _ = tx.send(format!("❌ 讀取域名失敗：{}", e));
@@ -327,10 +423,7 @@ impl WmApp {
                     };
                     match result {
                         Ok(accs) => {
-                            let _ = tx.send(format!(
-                                "__ACCOUNTS__{}",
-                                serde_json::to_string(&accs).unwrap_or_default()
-                            ));
+                            let _ = tx.send(format!("__ACCOUNTS__{}", serde_json::to_string(&accs).unwrap_or_default()));
                         }
                         Err(e) => {
                             let _ = tx.send(format!("❌ 讀取帳號失敗：{}", e));
@@ -351,19 +444,23 @@ impl eframe::App for WmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_logs();
 
+        // ===== 頂部狀態列 =====
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.heading("📮 Workspace Mail 自動化");
-            ui.label(format!(
-                "狀態：{}　進度：{}/{}",
-                self.status, self.done_count, self.total_count
-            ));
+            ui.horizontal(|ui| {
+                ui.heading("📮 Workspace Mail 自動化");
+                ui.separator();
+                ui.label(format!("狀態：{}", self.status));
+                ui.separator();
+                ui.label(format!("進度：{}/{}", self.done_count, self.total_count));
+            });
             ui.add_space(4.0);
         });
 
+        // ===== 底部 log =====
         egui::TopBottomPanel::bottom("log")
             .resizable(true)
-            .default_height(180.0)
+            .default_height(150.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong("執行紀錄");
@@ -378,36 +475,121 @@ impl eframe::App for WmApp {
                 });
             });
 
+        // ===== 左：帳號列表 =====
+        egui::SidePanel::left("accounts")
+            .resizable(true)
+            .default_width(430.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.strong(format!("帳號列表（{}）", self.accounts.len()));
+                    if ui.small_button("全選").clicked() {
+                        for a in &self.accounts {
+                            self.selected.insert(a.email.clone());
+                        }
+                    }
+                    if ui.small_button("清空選取").clicked() {
+                        self.selected.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0).hint_text("搜尋帳號…"));
+                    ui.separator();
+                    ui.selectable_value(&mut self.filter, AccFilter::All, "全部");
+                    ui.selectable_value(&mut self.filter, AccFilter::Available, "可用");
+                    ui.selectable_value(&mut self.filter, AccFilter::Cooling, "冷卻中");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("圖例:");
+                    ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "✅ 可用");
+                    ui.colored_label(egui::Color32::from_rgb(240, 170, 60), "⏳ 冷卻中");
+                    ui.separator();
+                    if ui.small_button("🗑 標記勾選為已使用").clicked() {
+                        let n = self.selected.len();
+                        for e in self.selected.iter() {
+                            self.usage.mark_used(e);
+                        }
+                        let _ = self.usage.save(&usage_path());
+                        self.log(format!("手動標記 {} 個帳號為已使用", n));
+                    }
+                });
+                ui.separator();
+
+                let visible_emails: Vec<String> = self
+                    .visible_accounts()
+                    .into_iter()
+                    .map(|a| a.email.clone())
+                    .collect();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for email in &visible_emails {
+                        let Some(acc) = self.accounts.iter().find(|a| &a.email == email).cloned() else {
+                            continue;
+                        };
+                        let status = self.usage.status(&acc.email, self.cooldown_min());
+                        let mut sel = self.selected.contains(&acc.email);
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut sel, "").changed() {
+                                if sel {
+                                    self.selected.insert(acc.email.clone());
+                                } else {
+                                    self.selected.remove(&acc.email);
+                                }
+                            }
+                            ui.label(&acc.email);
+                            match status {
+                                AccountStatus::Available => {
+                                    ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "✅ 可用");
+                                }
+                                AccountStatus::Cooling { remain_min } => {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(240, 170, 60),
+                                        format!("⏳ 冷卻 {}m", remain_min),
+                                    );
+                                }
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("▶ 單開").clicked() {
+                                    let acc = acc.clone();
+                                    self.run_single(&acc);
+                                }
+                            });
+                        });
+                    }
+                    if visible_emails.is_empty() {
+                        ui.label(egui::RichText::new("（沒有符合條件的帳號，請先載入帳號）").weak());
+                    }
+                });
+            });
+
+        // ===== 右：任務設定 =====
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // ===== Firebase 設定 =====
-                ui.collapsing("🔑 Firebase 設定", |ui| {
+                ui.add_space(4.0);
+                ui.heading("🎯 任務設定");
+
+                // Firebase / Chrome
+                ui.collapsing("🔑 連線設定", |ui| {
                     ui.horizontal(|ui| {
                         ui.label("API Key");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.api_key).desired_width(320.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Project ID");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.project_id).desired_width(320.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.api_key).desired_width(300.0));
                     });
                     ui.horizontal(|ui| {
                         ui.label("登入帳號");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.email).desired_width(320.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.email).desired_width(300.0));
                     });
                     ui.horizontal(|ui| {
                         ui.label("登入密碼");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.password).password(true).desired_width(320.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.cfg.firebase.password).password(true).desired_width(300.0));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Chrome 路徑");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.chrome_path).desired_width(320.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.cfg.chrome_path).desired_width(300.0));
                     });
                 });
 
                 ui.separator();
 
-                // ===== 任務設定 =====
-                ui.heading("🎯 任務設定");
+                // 帳號來源
                 ui.horizontal(|ui| {
                     ui.label("域名");
                     egui::ComboBox::from_id_source("domain_sel")
@@ -429,21 +611,23 @@ impl eframe::App for WmApp {
                             self.spawn_firestore_job(FirestoreJob::Accounts(self.cfg.domain.clone()));
                         }
                     }
-                    ui.label(format!("已載入 {} 個帳號", self.accounts.len()));
                 });
+
+                // 目標
                 ui.horizontal(|ui| {
                     ui.label("目標網址");
                     ui.add(egui::TextEdit::singleline(&mut self.cfg.url).desired_width(480.0));
                 });
 
-                ui.add_space(6.0);
-                ui.strong("填寫欄位（CSS selector → 內容，支援 {email} {password} {note} 變數）");
+                // 欄位
+                ui.add_space(4.0);
+                ui.strong("填寫欄位（CSS selector → 內容；支援 {email} {password} {note}）");
                 let mut remove_idx: Option<usize> = None;
                 for (i, f) in self.cfg.fields.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("{}:", i + 1));
-                        ui.add(egui::TextEdit::singleline(&mut f.selector).desired_width(200.0).hint_text("CSS selector"));
-                        ui.add(egui::TextEdit::singleline(&mut f.value).desired_width(260.0).hint_text("要輸入的內容"));
+                        ui.add(egui::TextEdit::singleline(&mut f.selector).desired_width(170.0).hint_text("CSS selector"));
+                        ui.add(egui::TextEdit::singleline(&mut f.value).desired_width(220.0).hint_text("內容"));
                         if ui.small_button("🗑").clicked() {
                             remove_idx = Some(i);
                         }
@@ -453,17 +637,16 @@ impl eframe::App for WmApp {
                     self.cfg.fields.remove(i);
                 }
                 if ui.small_button("＋ 新增欄位").clicked() {
-                    self.cfg
-                        .fields
-                        .push(FieldAction { selector: String::new(), value: "{email}".into() });
+                    self.cfg.fields.push(FieldAction { selector: String::new(), value: "{email}".into() });
                 }
 
-                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("送出按鈕 selector");
                     ui.add(egui::TextEdit::singleline(&mut self.cfg.submit_selector).desired_width(220.0));
                     ui.label("（留空則不點擊）");
                 });
+
+                // 執行參數
                 ui.horizontal(|ui| {
                     ui.label("並行數");
                     ui.add(egui::DragValue::new(&mut self.cfg.parallel).clamp_range(1..=100));
@@ -473,20 +656,30 @@ impl eframe::App for WmApp {
                     ui.add(egui::DragValue::new(&mut self.cfg.step_delay_ms).clamp_range(0..=30000));
                 });
 
-                ui.add_space(10.0);
+                ui.separator();
+
+                // 冷卻設定
+                ui.heading("⏳ 冷卻設定");
                 ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.cfg.cooldown_enabled, "啟用冷卻（使用過的帳號需等待才能再用）");
+                    ui.add_enabled_ui(self.cfg.cooldown_enabled, |ui| {
+                        ui.label("冷卻時間");
+                        ui.add(egui::DragValue::new(&mut self.cfg.cooldown_minutes).clamp_range(0..=10080).suffix(" 分鐘"));
+                    });
+                });
+                ui.checkbox(&mut self.cfg.auto_mark_used, "執行成功後自動標記為已使用");
+
+                ui.separator();
+
+                // 執行控制
+                ui.horizontal(|ui| {
+                    let sel_n = self.selected.len();
                     if !self.running {
-                        if ui
-                            .button(egui::RichText::new("▶ 開始執行").size(16.0))
-                            .clicked()
-                        {
-                            self.start_task();
+                        if ui.button(egui::RichText::new(format!("▶ 執行勾選（{}）", sel_n)).size(16.0)).clicked() {
+                            self.start_selected();
                         }
                     } else {
-                        if ui
-                            .button(egui::RichText::new("⏹ 停止").size(16.0))
-                            .clicked()
-                        {
+                        if ui.button(egui::RichText::new("⏹ 停止").size(16.0)).clicked() {
                             self.stopping.store(true, Ordering::SeqCst);
                             self.status = "停止中…".into();
                         }
@@ -496,18 +689,20 @@ impl eframe::App for WmApp {
                         self.status = "設定已儲存".into();
                     }
                 });
+                ui.label(egui::RichText::new("提示：勾選要執行的帳號 → 執行勾選；或點帳號右側「▶ 單開」只跑一個。").weak());
                 ui.add_space(8.0);
             });
         });
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        // 每秒刷新（冷卻倒數即時更新）
+        ctx.request_repaint_after(std::time::Duration::from_millis(1000));
     }
 }
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 720.0])
+            .with_inner_size([1180.0, 760.0])
             .with_title("Workspace Mail 自動化"),
         ..Default::default()
     };
